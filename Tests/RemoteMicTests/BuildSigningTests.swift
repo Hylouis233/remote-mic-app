@@ -790,6 +790,11 @@ struct BuildSigningTests {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/zsh")
         process.arguments = [fixture.path]
+        // These fixtures model the canonical release repository, independently
+        // of the fork hosting the test job. Real release guards stay unchanged.
+        var fixtureEnvironment = ProcessInfo.processInfo.environment
+        fixtureEnvironment["GITHUB_REPOSITORY"] = "HD838A/remote-mic-app"
+        process.environment = fixtureEnvironment
         let outputPipe = Pipe()
         let errorPipe = Pipe()
         process.standardOutput = outputPipe
