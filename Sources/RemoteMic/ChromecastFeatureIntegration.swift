@@ -300,6 +300,7 @@ final class ChromecastFeatureIntegration {
     private let feature: SayAllChromecastFeature
     #else
     private let g9 = G9N9NBluetoothBridge()
+    private let remoteVoiceRoute = RemoteVoiceRoute()
     private let g9HCI = G9N9NHCIController()
     private var g9HCIEnabled = false
     #endif
@@ -353,9 +354,22 @@ final class ChromecastFeatureIntegration {
         g9HCI.onLearningChange = { [weak self] in self?.onG9LearningChange?($0) }
         g9HCI.onLearningFeedback = { [weak self] in self?.onG9LearningFeedback?($0) }
         g9.onCapabilities = { [weak self] in self?.onDeclaredCapabilitiesChange?($0) }
-        g9.onVoiceStart = { [weak self] in self?.onVoiceStart?() }
-        g9.onVoiceStop = { [weak self] in self?.onVoiceStop?($0) }
-        g9.onSamples = { [weak self] in self?.onSamples?($0, $1) }
+        g9.onWakeRecovery = { [weak self] in
+            guard let self, self.g9HCIEnabled else { return }
+            self.g9HCI.retry()
+        }
+        g9.onVoiceStart = { [weak self] in
+            guard let self else { return }
+            if self.remoteVoiceRoute.begin(generation: self.g9.voiceGeneration) { self.onVoiceStart?() }
+        }
+        g9.onVoiceStop = { [weak self] reason in
+            guard let self else { return }
+            if self.remoteVoiceRoute.end(reason) { self.onVoiceStop?(reason) }
+        }
+        g9.onSamples = { [weak self] samples, generation in
+            guard let self else { return }
+            if !self.remoteVoiceRoute.consume(samples, generation: generation) { self.onSamples?(samples, generation) }
+        }
         g9.onLog = { [weak self] in self?.onLog?($0) }
         g9.hid.prepareNativeInput = { [weak self] in self?.prepareNativeInput?($0) == true }
         g9.hid.restoreNativeInput = { [weak self] in self?.restoreNativeInput?() }

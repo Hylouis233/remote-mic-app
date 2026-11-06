@@ -1,3 +1,4 @@
+import AppKit
 import CoreBluetooth
 import Foundation
 
@@ -11,8 +12,10 @@ final class G9N9NBluetoothBridge: NSObject, CBCentralManagerDelegate, CBPeripher
     var onVoiceStop: ((ChromecastVoiceEndReason) -> Void)?
     var onSamples: (([Int16], Int) -> Void)?
     var onLog: ((String) -> Void)?
+    var onWakeRecovery: (() -> Void)?
     let hid = G9N9NHIDMonitor()
-    private let voice = G9N9NVoiceSession()
+    private let voice: G9N9NVoiceSession
+    var voiceGeneration: Int { voice.generation }
     private var central: CBCentralManager?
     private var peripheral: CBPeripheral?
     private var transmit: CBCharacteristic?
@@ -35,6 +38,9 @@ final class G9N9NBluetoothBridge: NSObject, CBCentralManagerDelegate, CBPeripher
     private var reconnectWork: DispatchWorkItem?
     private var idle: DispatchWorkItem?
     private var tail: DispatchWorkItem?
+    private let wakeNotifications: NotificationCenter
+    private var wakeObserver: NSObjectProtocol?
+    private var wakeRecoveryPending = false
     private var status: ChromecastLinkStatus = .disabled {
         didSet { if status != oldValue { onStatus?(status) } }
     }
@@ -44,12 +50,24 @@ final class G9N9NBluetoothBridge: NSObject, CBCentralManagerDelegate, CBPeripher
 
     init(makeCentral: @escaping (CBCentralManagerDelegate) -> CBCentralManager? = {
         CBCentralManager(delegate: $0, queue: .main)
-    }) {
+    }, wakeNotifications: NotificationCenter = NSWorkspace.shared.notificationCenter,
+         voiceSession: G9N9NVoiceSession = G9N9NVoiceSession()) {
         self.makeCentral = makeCentral
+        self.wakeNotifications = wakeNotifications
+        voice = voiceSession
         super.init()
         voice.onWrite = { [weak self] in self?.write($0) }
         voice.onStart = { [weak self] in self?.onVoiceStart?() }
-        voice.onStop = { [weak self] in self?.onVoiceStop?($0) }
+        voice.onStop = { [weak self] reason in
+            self?.onVoiceStop?(reason)
+            if reason.isNormal {
+                // A normal live session proves the link recovered; leave the
+                // host's asynchronous playback drain completely undisturbed.
+                self?.wakeRecoveryPending = false
+            } else {
+                self?.recoverAfterWakeIfReady()
+            }
+        }
         voice.onSamples = { [weak self] in self?.onSamples?($0, $1) }
         voice.onLog = { [weak self] in self?.onLog?($0) }
         hid.onLog = { [weak self] in self?.onLog?($0) }
@@ -62,6 +80,7 @@ final class G9N9NBluetoothBridge: NSObject, CBCentralManagerDelegate, CBPeripher
         reconnectWork?.cancel()
         idle?.cancel()
         tail?.cancel()
+        if let wakeObserver { wakeNotifications.removeObserver(wakeObserver) }
         peripheral?.delegate = nil
         central?.delegate = nil
         central?.stopScan()
@@ -70,6 +89,11 @@ final class G9N9NBluetoothBridge: NSObject, CBCentralManagerDelegate, CBPeripher
     func start() {
         guard !enabled, !stopping else { return }
         enabled = true
+        wakeObserver = wakeNotifications.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            guard let self, self.enabled else { return }
+            self.wakeRecoveryPending = true
+            self.recoverAfterWakeIfReady()
+        }
         central = makeCentral(self)
         retry = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
             guard let self, self.enabled else { return }
@@ -90,6 +114,9 @@ final class G9N9NBluetoothBridge: NSObject, CBCentralManagerDelegate, CBPeripher
         stopping = true
         defer { stopping = false }
         enabled = false
+        if let wakeObserver { wakeNotifications.removeObserver(wakeObserver) }
+        wakeObserver = nil
+        wakeRecoveryPending = false
         reconnectWork?.cancel()
         reconnectWork = nil
         retry?.invalidate()
@@ -110,6 +137,14 @@ final class G9N9NBluetoothBridge: NSObject, CBCentralManagerDelegate, CBPeripher
         if enabled { stop() }
         rejected.removeAll()
         start()
+    }
+
+    private func recoverAfterWakeIfReady() {
+        guard enabled, wakeRecoveryPending, !voice.active else { return }
+        wakeRecoveryPending = false
+        onLog?("G9N9N LINK phase=recovering reason=system_wake active_voice=false")
+        onWakeRecovery?()
+        reconnect()
     }
 
     func prepareHCIIdentity() {

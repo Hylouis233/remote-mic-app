@@ -378,6 +378,7 @@ private final class RemoteMicAppDelegate: NSObject, NSApplicationDelegate, NSMen
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        AppLogger.shared.write("APP LIFECYCLE phase=terminating reason=appkit_callback")
         model.privateFeature.hideHUDImmediately()
         model.stop()
         model.settings.discardOnboardingVoiceTrial()
@@ -453,6 +454,7 @@ private final class RemoteMicAppDelegate: NSObject, NSApplicationDelegate, NSMen
                 queue: .main
             )
             source.setEventHandler {
+                AppLogger.shared.write("APP LIFECYCLE phase=termination_requested reason=signal signal=\(signalNumber == SIGTERM ? "sigterm" : "sigint")")
                 NSApp.terminate(nil)
             }
             source.resume()
@@ -1504,6 +1506,7 @@ private final class RemoteMicAppDelegate: NSObject, NSApplicationDelegate, NSMen
     }
 
     @objc private func quit() {
+        AppLogger.shared.write("APP LIFECYCLE phase=termination_requested reason=user_quit")
         NSApp.terminate(nil)
     }
 }
