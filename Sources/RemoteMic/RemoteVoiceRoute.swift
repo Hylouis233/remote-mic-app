@@ -178,6 +178,7 @@ final class RemoteVoiceSSHTransport: RemoteVoiceTransporting {
             let command = "& (Join-Path $env:LOCALAPPDATA 'SayAllRemoteVoice\\SayAllRemoteVoice.exe') --relay"
             let encoded = command.data(using: .utf16LittleEndian)!.base64EncodedString()
             child.arguments = ["-T", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
+                "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "ControlPersist=no",
                 "-o", "ConnectTimeout=5", "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=2",
                 self.host, "powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded]
             let stdin = Pipe(), stdout = Pipe(), stderr = Pipe()
@@ -429,6 +430,7 @@ final class RemoteVoiceRoute {
             }
             _ = running() // Warm source identity at startup, outside the voice press path.
             let reader = RemoteVoiceFocusReader(url: URL(fileURLWithPath: path), isSourceRunning: running)
+            _ = reader.snapshot() // Initial bounded tail parsing stays off the first voice press.
             snapshot = {
                 guard RemoteVoiceFocusReader.selectedServerMatches(url: URL(fileURLWithPath: configPath), expected: expectedServer) else { return .unknown }
                 return reader.snapshot()

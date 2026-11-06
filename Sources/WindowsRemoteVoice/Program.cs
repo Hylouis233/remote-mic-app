@@ -20,7 +20,7 @@ namespace SayAllRemoteVoice {
             "frame_length", "frame_count", "line_length", "virtual_output_not_unique", "output_open_failed",
             "pcm_shape", "audio_backpressure", "output_prepare_failed", "output_write_failed", "session_missing",
             "session_conflict", "voice_key_failed", "session_mismatch", "drain_or_release_failed", "unknown_operation",
-            "audio_probe_failed", "voice_key_not_supported"
+            "audio_probe_failed", "voice_key_not_supported", "stdin_pipe_read_failed"
         };
         public static string Of(Exception error) { return Known.Contains(error.Message) ? error.Message : error.GetType().Name; }
     }
@@ -49,14 +49,42 @@ namespace SayAllRemoteVoice {
             byte[] header = BitConverter.GetBytes((uint)body.Length);
             stream.Write(header, 0, 4); stream.Write(body, 0, body.Length); stream.Flush();
         }
+        public static async Task<byte[]> ReadAsync(Stream stream) {
+            byte[] header = new byte[4];
+            int first = await stream.ReadAsync(header, 0, 4).ConfigureAwait(false);
+            if (first == 0) return null;
+            await FillAsync(stream, header, first, 4 - first).ConfigureAwait(false);
+            uint length = BitConverter.ToUInt32(header, 0);
+            if (length == 0 || length > Maximum) throw new InvalidDataException("frame_length");
+            byte[] body = new byte[(int)length];
+            await FillAsync(stream, body, 0, body.Length).ConfigureAwait(false);
+            return body;
+        }
+        static async Task FillAsync(Stream stream, byte[] data, int offset, int count) {
+            while (count > 0) {
+                int n = await stream.ReadAsync(data, offset, count).ConfigureAwait(false);
+                if (n == 0) throw new EndOfStreamException();
+                offset += n; count -= n;
+            }
+        }
+        public static async Task WriteAsync(Stream stream, byte[] body) {
+            if (body.Length == 0 || body.Length > Maximum) throw new InvalidDataException("frame_length");
+            byte[] header = BitConverter.GetBytes((uint)body.Length);
+            await stream.WriteAsync(header, 0, 4).ConfigureAwait(false);
+            await stream.WriteAsync(body, 0, body.Length).ConfigureAwait(false);
+            await stream.FlushAsync().ConfigureAwait(false);
+        }
         // SSH shells may normalize line endings. Base64 keeps native PCM intact.
         public static string ReadLine(TextReader reader) {
             StringBuilder line = new StringBuilder();
             while (true) {
                 int c = reader.Read();
                 if (c == -1) return line.Length == 0 ? null : line.ToString();
-                if (c == '\n') return line.ToString();
-                if (c != '\r') line.Append((char)c);
+                if (c == '\n' || c == '\r') {
+                    if (line.Length == 0) continue;
+                    return line.ToString();
+                }
+                line.Append((char)c);
                 if (line.Length > 90000) throw new InvalidDataException("line_length");
             }
         }
@@ -70,6 +98,42 @@ namespace SayAllRemoteVoice {
         }
         public static string EncodeLine(byte[] body) {
             using (MemoryStream memory = new MemoryStream()) { Write(memory, body); return Convert.ToBase64String(memory.ToArray()); }
+        }
+    }
+
+    sealed class LiveLineReaderFixture : TextReader {
+        readonly string line;
+        int offset;
+        public LiveLineReaderFixture(string line) { this.line = line; }
+        public override int Read() {
+            if (offset == line.Length) throw new InvalidOperationException("reader_waited_past_terminator");
+            return line[offset++];
+        }
+    }
+
+    sealed class FramedStdinReader : TextReader {
+        readonly Stream stream;
+        readonly IntPtr handle;
+        readonly byte[] buffer = new byte[4096];
+        int offset, count;
+        [DllImport("kernel32.dll")] static extern bool PeekNamedPipe(IntPtr pipe, IntPtr data, uint size, IntPtr read, out uint available, IntPtr remaining);
+        [DllImport("kernel32.dll", SetLastError = true)] static extern bool ReadFile(IntPtr file, byte[] data, uint count, out uint read, IntPtr overlapped);
+        public FramedStdinReader(Stream stream, IntPtr handle) { this.stream = stream; this.handle = handle; }
+        public override int Read() {
+            if (offset == count) {
+                uint available;
+                int request = handle != IntPtr.Zero && PeekNamedPipe(handle, IntPtr.Zero, 0, IntPtr.Zero, out available, IntPtr.Zero)
+                    ? (int)Math.Max(1u, Math.Min(available, (uint)buffer.Length)) : 1;
+                if (handle != IntPtr.Zero) {
+                    uint read;
+                    if (!ReadFile(handle, buffer, (uint)request, out read, IntPtr.Zero) && Marshal.GetLastWin32Error() != 109)
+                        throw new IOException("stdin_pipe_read_failed");
+                    count = (int)read;
+                } else { count = stream.Read(buffer, 0, request); }
+                offset = 0;
+                if (count == 0) return -1;
+            }
+            return buffer[offset++];
         }
     }
 
@@ -262,7 +326,7 @@ namespace SayAllRemoteVoice {
         public const string PipeName = "SayAll.RemoteVoice.v1";
         readonly EventLog log = new EventLog();
         readonly object sessionGate = new object();
-        readonly uint deviceId;
+        readonly string deviceName;
         readonly VoiceKeyLease voiceKey;
         volatile bool stopping;
         NamedPipeServerStream pipe;
@@ -276,7 +340,7 @@ namespace SayAllRemoteVoice {
         readonly System.Threading.Timer watchdog;
 
         public DesktopReceiver(string device, ushort key) {
-            deviceId = WaveOutput.Select(device); voiceKey = new VoiceKeyLease(key, VoiceKey.Post, Thread.Sleep);
+            WaveOutput.Select(device); deviceName = device; voiceKey = new VoiceKeyLease(key, VoiceKey.Post, Thread.Sleep);
             watchdog = new System.Threading.Timer(CheckDeadline, null, 500, 500);
         }
         void CheckDeadline(object state) {
@@ -331,7 +395,7 @@ namespace SayAllRemoteVoice {
         }
         void Handle(Stream stream, byte[] frame) {
             if (frame.Length == 1 && frame[0] == 6 && session == null && !voiceKey.Held) {
-                using (WaveOutput probe = new WaveOutput(deviceId)) {
+                using (WaveOutput probe = new WaveOutput(WaveOutput.Select(deviceName))) {
                     probe.Append(new byte[32000], 16000); probe.Append(new byte[32000], 16000);
                     if (!probe.Drain() || probe.PlayedSamples != 32000) throw new IOException("audio_probe_failed");
                     Wire.Write(stream, (new byte[] { 134 }).Concat(BitConverter.GetBytes(probe.PlayedSamples)).ToArray());
@@ -345,7 +409,7 @@ namespace SayAllRemoteVoice {
             lastInput = Stopwatch.GetTimestamp();
             if (kind == 1) {
                 if (frame.Length != 17 || session != null || voiceKey.Held) throw new InvalidDataException("session_conflict");
-                output = new WaveOutput(deviceId); session = id; received = 0;
+                output = new WaveOutput(WaveOutput.Select(deviceName)); session = id; received = 0;
                 startedAt = Stopwatch.GetTimestamp();
                 if (!voiceKey.Acquire()) throw new IOException("voice_key_failed");
                 log.Write("phase=started target=virtual_audio external_voice_result=unknown");
@@ -393,6 +457,7 @@ namespace SayAllRemoteVoice {
 
     static class Program {
         [DllImport("kernel32.dll")] static extern bool FreeConsole();
+        [DllImport("kernel32.dll")] static extern IntPtr GetStdHandle(int type);
         [STAThread] static int Main(string[] args) {
             try {
                 if (args.Contains("--list-devices")) {
@@ -400,7 +465,7 @@ namespace SayAllRemoteVoice {
                     for (int i = 0; i < names.Length; i++) Console.WriteLine(i + "\t" + names[i]);
                     return 0;
                 }
-                if (args.Contains("--relay")) return Relay();
+                if (args.Contains("--relay")) return Relay().GetAwaiter().GetResult();
                 if (args.Contains("--diagnose-audio")) {
                     using (NamedPipeClientStream pipe = new NamedPipeClientStream(".", DesktopReceiver.PipeName, PipeDirection.InOut)) {
                         pipe.Connect(5000);
@@ -422,10 +487,12 @@ namespace SayAllRemoteVoice {
                     }
                 }
                 if (args.Contains("--stdio-self-test")) {
-                    Console.WriteLine(Wire.EncodeLine(new byte[] { 128, 1 })); Console.Out.Flush();
-                    string line = Wire.ReadLine(Console.In);
+                    TextReader stdin = new FramedStdinReader(Console.OpenStandardInput(), GetStdHandle(-10));
+                    StreamWriter stdout = new StreamWriter(Console.OpenStandardOutput(), Encoding.ASCII, 4096) { AutoFlush = true, NewLine = "\n" };
+                    stdout.WriteLine(Wire.EncodeLine(new byte[] { 128, 1 }));
+                    string line = Wire.ReadLine(stdin);
                     if (line == null) return 15;
-                    Console.WriteLine(Wire.EncodeLine(Wire.DecodeLine(line))); Console.Out.Flush();
+                    stdout.WriteLine(Wire.EncodeLine(Wire.DecodeLine(line)));
                     return 0;
                 }
                 if (!args.Contains("--desktop") || !Environment.UserInteractive || Process.GetCurrentProcess().SessionId == 0) return 2;
@@ -473,19 +540,28 @@ namespace SayAllRemoteVoice {
         static string Value(string[] args, string key, string fallback) {
             int index = Array.IndexOf(args, key); return index >= 0 && index + 1 < args.Length ? args[index + 1] : fallback;
         }
-        static int Relay() {
-            using (NamedPipeClientStream pipe = new NamedPipeClientStream(".", DesktopReceiver.PipeName, PipeDirection.InOut)) {
+        static async Task<int> Relay() {
+            using (NamedPipeClientStream pipe = new NamedPipeClientStream(".", DesktopReceiver.PipeName, PipeDirection.InOut, PipeOptions.Asynchronous)) {
                 pipe.Connect(5000);
-                Task input = Task.Run(delegate {
+                TextReader stdin = new FramedStdinReader(Console.OpenStandardInput(), GetStdHandle(-10));
+                StreamWriter stdout = new StreamWriter(Console.OpenStandardOutput(), Encoding.ASCII, 4096) { AutoFlush = true, NewLine = "\n" };
+                Task input = Task.Run(async delegate {
                     string line;
-                    while ((line = Wire.ReadLine(Console.In)) != null) Wire.Write(pipe, Wire.DecodeLine(line));
+                    bool first = true;
+                    while ((line = Wire.ReadLine(stdin)) != null) {
+                        if (first) { first = false; Console.Error.WriteLine("RELAY input=first_frame content_logged=false"); }
+                        await Wire.WriteAsync(pipe, Wire.DecodeLine(line)).ConfigureAwait(false);
+                    }
                     pipe.Dispose();
                 });
-                Task output = Task.Run(delegate {
+                Task output = Task.Run(async delegate {
                     byte[] frame;
-                    while ((frame = Wire.Read(pipe)) != null) { Console.Out.WriteLine(Wire.EncodeLine(frame)); Console.Out.Flush(); }
+                    while ((frame = await Wire.ReadAsync(pipe).ConfigureAwait(false)) != null) {
+                        stdout.WriteLine(Wire.EncodeLine(frame));
+                    }
                 });
-                Task.WaitAny(input, output);
+                Task completed = await Task.WhenAny(input, output).ConfigureAwait(false);
+                await completed.ConfigureAwait(false);
                 return 0;
             }
         }
@@ -500,6 +576,8 @@ namespace SayAllRemoteVoice {
             }
             try { Wire.DecodeLine(Wire.EncodeLine(data) + Wire.EncodeLine(data)); return 13; } catch { }
             try { Wire.ReadLine(new StringReader(new string('A', 90001))); return 14; } catch (InvalidDataException) { }
+            if (Wire.ReadLine(new LiveLineReaderFixture("QQ==\r")) != "QQ==") return 23;
+            if (Wire.ReadLine(new LiveLineReaderFixture("QQ==\n")) != "QQ==") return 24;
             bool allowRelease = false; int keyCalls = 0;
             VoiceKeyLease lease = new VoiceKeyLease(113, delegate(ushort key, bool down) { keyCalls++; return down || allowRelease; }, delegate(int ms) { });
             if (!lease.Acquire() || lease.Release() || !lease.Held || keyCalls != 4) return 18;

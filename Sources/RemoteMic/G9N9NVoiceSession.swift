@@ -21,6 +21,8 @@ final class G9N9NVoiceSession {
     private var samples = 0
     private var startedAt: TimeInterval = 0
     private var firstPCM = false
+    private var firstNotification = false
+    private var lastObservedControl: UInt8?
 
     static func matches(model: String?, manufacturer: String?) -> Bool {
         model?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "hid_mouse"
@@ -38,7 +40,12 @@ final class G9N9NVoiceSession {
     }
 
     func control(_ data: Data, now: TimeInterval) {
-        guard let caps = capabilities, let opcode = data.first else { return }
+        guard let opcode = data.first else { return }
+        if [UInt8(0), 4, 8].contains(opcode), lastObservedControl != opcode {
+            lastObservedControl = opcode
+            onLog?("G9N9N CONTROL opcode=\(opcode) generation=\(generation) active=\(active) tail_pending=\(stopDeadline != nil) capabilities_ready=\(capabilities != nil)")
+        }
+        guard let caps = capabilities else { return }
         let bytes = Array(data)
         switch opcode {
         case 0x08:
@@ -74,6 +81,10 @@ final class G9N9NVoiceSession {
 
     func audio(_ data: Data, now: TimeInterval) {
         guard capabilities != nil, active, !cancelled, !data.isEmpty else { return }
+        if !firstNotification {
+            firstNotification = true
+            onLog?("G9N9N AUDIO phase=first_notification generation=\(generation) notification_bytes=\(data.count) trigger_down_to_first_notification_ms=\(Int(max(0, now - startedAt) * 1000)) content_logged=false")
+        }
         // Do not infer a new session from late audio after STOP or host cancellation.
         if let deadline = stopDeadline, now >= deadline {
             drain(now: now)
@@ -112,6 +123,7 @@ final class G9N9NVoiceSession {
         capabilities = nil
         sessionID = 0
         cancelled = false
+        lastObservedControl = nil
     }
 
     private func begin(now: TimeInterval) {
@@ -120,6 +132,7 @@ final class G9N9NVoiceSession {
         frames = 0
         samples = 0
         firstPCM = false
+        firstNotification = false
         startedAt = now
         stopDeadline = nil
         accumulator.reset()

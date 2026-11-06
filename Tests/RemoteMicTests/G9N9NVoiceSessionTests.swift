@@ -46,6 +46,20 @@ struct G9N9NVoiceSessionTests {
         #expect(samples == expected)
     }
 
+    @Test func notificationAndDecodedPCMHaveSeparateContentFreeTiming() {
+        let s = session()
+        var logs: [String] = []
+        s.onLog = { logs.append($0) }
+        s.control(Data([8]), now: 0)
+        s.audio(Data(repeating: 0x5A, count: 100), now: 0.01)
+        #expect(logs.contains { $0.contains("phase=first_notification") && $0.contains("notification_bytes=100") && $0.contains("_ms=10") })
+        #expect(!logs.contains { $0.contains("phase=first_pcm") })
+        s.audio(Data(repeating: 0x5A, count: 147), now: 0.03)
+        #expect(logs.filter { $0.contains("phase=first_notification") }.count == 1)
+        #expect(logs.contains { $0.contains("phase=first_pcm") && $0.contains("_ms=30") })
+        #expect(!logs.contains { $0.contains("5A5A") })
+    }
+
     @Test func fragmented247ByteFramesAndTailAreDeliveredBeforeStop() {
         let s = session()
         var events: [String] = []
