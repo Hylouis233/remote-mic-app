@@ -46,6 +46,9 @@ functions[driver_naming_safe_directory]=$functions[fixture_original_safe_directo
 python3 - "$ROOT" "$RELEASE_OUTPUT_DIR" "$WORK" "$RELEASE_ARCH" <<'PY'
 import hashlib, pathlib, plistlib, subprocess, sys
 root, output, work = map(pathlib.Path, sys.argv[1:4]); arch = sys.argv[4]
+trash_helper = (root/'packaging/doubao-driver/install/trash-legacy-app.zsh').read_text()
+trash_helper = 'fixture_pkill() { return 0; }\n' + trash_helper.replace('/usr/bin/pkill', 'fixture_pkill')
+assert '/usr/bin/pkill' not in trash_helper, 'legacy helper still has a live process killer'
 source = (root/'packaging/doubao-driver/install/postinstall').read_text()
 health = source[source.index('driver_architecture() {'):source.index('test -f "$RELEASE_CONFIG"')]
 block = source[source.index('restore_previous_driver() {'):source.index('STAGED_DRIVER_TRASH_ROOT=')]
@@ -225,7 +228,7 @@ for scenario in ['legacy_stale_brand', 'brand_stale_legacy', 'legacy_two_records
     (scripts/'driver-naming.zsh').write_text(f'FIXTURE_ARCH={arch}\n' + full_stubs + helper)
     (scripts/'preinstall').write_text(pre)
     (scripts/'postinstall').write_text(full_post)
-    (scripts/'trash-legacy-app.zsh').write_bytes((root/'packaging/doubao-driver/install/trash-legacy-app.zsh').read_bytes())
+    (scripts/'trash-legacy-app.zsh').write_text(trash_helper)
     (scripts/'release-variant.plist').write_bytes(plistlib.dumps({
         'ExpectedArchitecture':arch,'MinimumSystemMajor':13,'MinimumSystemVersion':'13.0','PackageBuild':'999999'}))
     if scenario.endswith('record_write_retry'):
@@ -389,7 +392,7 @@ for scenario in ['legacy_uninstall', 'brand_uninstall', 'conflict_uninstall', 'n
         (install_scripts/'driver-naming.zsh').write_text(f'FIXTURE_ARCH={arch}\n'+full_stubs+helper)
         (install_scripts/'preinstall').write_text(pre)
         (install_scripts/'postinstall').write_text(full_post)
-        (install_scripts/'trash-legacy-app.zsh').write_bytes((root/'packaging/doubao-driver/install/trash-legacy-app.zsh').read_bytes())
+        (install_scripts/'trash-legacy-app.zsh').write_text(trash_helper)
         (install_scripts/'release-variant.plist').write_bytes(plistlib.dumps({
             'ExpectedArchitecture':arch,'MinimumSystemMajor':13,'MinimumSystemVersion':'13.0','PackageBuild':'999999'}))
         result = subprocess.run(['/bin/zsh',str(install_scripts/'preinstall'),'fixture','fixture',str(volume)],capture_output=True,text=True)
