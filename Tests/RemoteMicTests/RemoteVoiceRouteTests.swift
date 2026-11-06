@@ -14,6 +14,48 @@ struct RemoteVoiceRouteTests {
         func retryIfDisconnected() { retries += 1 }
     }
 
+    @Test func shortControlReplyArrivesWhilePeerRemainsOpen() throws {
+        let pipe = Pipe()
+        defer {
+            try? pipe.fileHandleForWriting.close()
+            try? pipe.fileHandleForReading.close()
+        }
+        let reply = Data((RemoteVoiceWire.frame(128, payload: Data([1])).base64EncodedString() + "\n").utf8)
+        try pipe.fileHandleForWriting.write(contentsOf: reply)
+        let completed = DispatchSemaphore(value: 0)
+        // A dedicated worker avoids starving behind unrelated suites on the global pool.
+        Thread {
+            defer { completed.signal() }
+            let received = try? RemoteVoicePipeReader.readAvailable(from: pipe.fileHandleForReading)
+            #expect(received == reply)
+        }.start()
+        let beforeEOF = completed.wait(timeout: .now() + 3) == .success
+        #expect(beforeEOF, "A small handshake must arrive before EOF or a full read buffer")
+        // Also unblock the old failing implementation so failure leaves no worker behind.
+        if !beforeEOF {
+            try pipe.fileHandleForWriting.close()
+            #expect(completed.wait(timeout: .now() + 1) == .success)
+        }
+    }
+
+    @Test func replyReadsPreserveBoundsAndDistinguishTemporaryEmptyFromEOF() throws {
+        let pipe = Pipe()
+        defer {
+            try? pipe.fileHandleForWriting.close()
+            try? pipe.fileHandleForReading.close()
+        }
+        #expect(try RemoteVoicePipeReader.readAvailable(from: pipe.fileHandleForReading) == nil)
+        let reply = Data(repeating: 85, count: 5_000)
+        try pipe.fileHandleForWriting.write(contentsOf: reply)
+        let first = try #require(try RemoteVoicePipeReader.readAvailable(from: pipe.fileHandleForReading))
+        let second = try #require(try RemoteVoicePipeReader.readAvailable(from: pipe.fileHandleForReading))
+        #expect(first.count == RemoteVoicePipeReader.maximumRead)
+        #expect(first + second == reply)
+        #expect(try RemoteVoicePipeReader.readAvailable(from: pipe.fileHandleForReading) == nil)
+        try pipe.fileHandleForWriting.close()
+        #expect(try RemoteVoicePipeReader.readAvailable(from: pipe.fileHandleForReading) == Data())
+    }
+
     @Test func enabledIncompleteConfigurationCannotRedirectToMac() throws {
         let name = UUID().uuidString
         let defaults = try #require(UserDefaults(suiteName: name))

@@ -21,7 +21,7 @@
 
 ## 自动化与无输入预检
 
-- `swift test --disable-keychain --jobs 4 --filter RemoteVoiceRouteTests`：焦点日志分片/轮转、源进程退出、超长行、分帧、目标锁定、generation隔离、背压、取消和本机透传。
+- `swift test --disable-keychain --jobs 4 --filter RemoteVoiceRouteTests`：焦点日志分片/轮转、源进程退出、超长行、分帧、目标锁定、generation隔离、背压、取消和本机透传；真实管道的小握手须在写端仍打开时返回，暂时无数据不得误判为EOF。
 - Windows `-BuildOnly`：在有界 Staging 编译和自测，不替换运行版本。
 - 接收器 `--self-test`：协议上限、二进制完整往返、释放失败保留所有权、后续恢复及闲置期限；不发按键或音频。
 - `--audio-self-test --device '<虚拟输出名称>'`：32000个静音样本经过真实虚拟输出自然排空，不触发语音键。
@@ -52,10 +52,12 @@ Mac复用AppLogger；Windows仅自己的LocalAppData/SayAllRemoteVoice/Logs，�
 
 ## 当前候选结果
 
-Mac基础焦点/协议和会话隔离测试已通过，最新完整公开1309项/95套件通过，包含登录、唤醒、会话隔离及背压路径。
+Mac基础焦点/协议和会话隔离测试已通过，最新完整公开1311项/95套件通过，包含登录、唤醒、会话隔离、EOF前小消息及背压路径。
 Windows自测、保持producer打开的SSH往返、同连接连续两轮32000静音样本输出和交互桌面管道探测通过，未触发真实语音键。
 接收器暂存升级、安全退出/重新启动及升级后交互桌面静音输出复验通过；任务以普通交互用户运行。
-用户已安装Windows豆包并确认其配置为左Alt；接收器应匹配164，虚拟麦克风及全局语音结果仍随真机测试确认。
+用户已安装Windows豆包并确认其配置为左Alt，麦克风已选对应虚拟capture端点；接收器匹配164，实际录音及文字上屏仍随真机测试确认。
+Mac持续SSH小握手原先被Foundation读取缓冲阻塞，已用EOF前失败回归定位，修复及边界见
+[Mac握手记录](../Bugs/2026-11-07-remote-voice-mac-handshake-buffering.md)。
 用户已选择Deskflow配置与日志。现有配置的log/level字符串已按该版本公开格式规范为数值4，
 客户端短暂重连后出现真实Mac→Windows→Mac焦点事件；未改变剪贴板、证书或输入内容设置。
 Mac登录自动启动已通过原生设置开启；G9唤醒重连候选及其真实验证边界见

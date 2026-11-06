@@ -125,6 +125,28 @@ enum RemoteVoiceWire {
     }
 }
 
+enum RemoteVoicePipeReader {
+    static let maximumRead = 4_096
+
+    /// nil means temporarily empty; empty Data means EOF. Never wait for a full buffer.
+    static func readAvailable(from handle: FileHandle) throws -> Data? {
+        let fd = handle.fileDescriptor
+        let flags = fcntl(fd, F_GETFL)
+        guard flags >= 0,
+              flags & O_NONBLOCK != 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) >= 0
+        else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        var bytes = [UInt8](repeating: 0, count: maximumRead)
+        while true {
+            let count = bytes.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress, $0.count) }
+            if count >= 0 { return Data(bytes.prefix(count)) }
+            let error = errno
+            if error == EINTR { continue }
+            if error == EAGAIN || error == EWOULDBLOCK { return nil }
+            throw POSIXError(POSIXErrorCode(rawValue: error) ?? .EIO)
+        }
+    }
+}
+
 /// One authenticated SSH stream. No new TCP listener, key material, or content log.
 protocol RemoteVoiceTransporting: AnyObject {
     @discardableResult func send(_ frame: Data) -> Bool
@@ -205,13 +227,17 @@ final class RemoteVoiceSSHTransport: RemoteVoiceTransporting {
                 }
                 self.reservedReceive += 4_096
                 self.lock.unlock()
-                let data = (try? file.read(upToCount: 4_096)) ?? Data()
+                let result = Result { try RemoteVoicePipeReader.readAvailable(from: file) }
                 self.queue.async { [weak self] in
-                    guard let self else { return }
+                    guard let self, self.generation == attempt else { return }
                     self.lock.lock()
-                    if self.generation == attempt { self.reservedReceive = max(0, self.reservedReceive - 4_096) }
+                    self.reservedReceive = max(0, self.reservedReceive - 4_096)
                     self.lock.unlock()
-                    self.receive(data, attempt: attempt)
+                    switch result {
+                    case .success(let data):
+                        if let data { self.receive(data, attempt: attempt) }
+                    case .failure: self.fail("read_failed")
+                    }
                 }
             }
             // Drain SSH errors without persisting hostnames, paths, or credentials.
