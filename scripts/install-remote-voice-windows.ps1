@@ -1,6 +1,6 @@
 param(
     [string]$DeviceName = 'CABLE Input',
-    [ValidateRange(112, 123)][int]$VoiceKey = 113,
+    [ValidateScript({ ($_ -ge 112 -and $_ -le 123) -or $_ -eq 164 })][int]$VoiceKey = 113,
     [switch]$BuildOnly,
     [switch]$Uninstall
 )

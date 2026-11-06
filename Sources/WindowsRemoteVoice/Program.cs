@@ -20,7 +20,7 @@ namespace SayAllRemoteVoice {
             "frame_length", "frame_count", "line_length", "virtual_output_not_unique", "output_open_failed",
             "pcm_shape", "audio_backpressure", "output_prepare_failed", "output_write_failed", "session_missing",
             "session_conflict", "voice_key_failed", "session_mismatch", "drain_or_release_failed", "unknown_operation",
-            "audio_probe_failed", "voice_key_not_function_key"
+            "audio_probe_failed", "voice_key_not_supported"
         };
         public static string Of(Exception error) { return Known.Contains(error.Message) ? error.Message : error.GetType().Name; }
     }
@@ -232,8 +232,10 @@ namespace SayAllRemoteVoice {
         }
         [StructLayout(LayoutKind.Sequential)] struct Input { public uint type; public InputUnion data; }
         [DllImport("user32.dll", SetLastError = true)] static extern uint SendInput(uint count, Input[] inputs, int size);
+        [DllImport("user32.dll")] static extern uint MapVirtualKey(uint code, uint type);
         public static bool Post(ushort key, bool down) {
-            Input input = new Input { type = 1, data = new InputUnion { keyboard = new KeyboardInput { key = key, flags = down ? 0u : 2u, extra = (UIntPtr)0x53415652u } } };
+            Input input = new Input { type = 1, data = new InputUnion { keyboard = new KeyboardInput { key = key,
+                scan = (ushort)MapVirtualKey(key, 0), flags = down ? 0u : 2u, extra = (UIntPtr)0x53415652u } } };
             return SendInput(1, new Input[] { input }, Marshal.SizeOf(typeof(Input))) == 1;
         }
     }
@@ -429,7 +431,7 @@ namespace SayAllRemoteVoice {
                 if (!args.Contains("--desktop") || !Environment.UserInteractive || Process.GetCurrentProcess().SessionId == 0) return 2;
                 string device = Value(args, "--device", "CABLE Input");
                 ushort key = UInt16.Parse(Value(args, "--voice-key", "113"));
-                if (key < 112 || key > 123) throw new InvalidOperationException("voice_key_not_function_key");
+                if ((key < 112 || key > 123) && key != 164) throw new InvalidOperationException("voice_key_not_supported");
                 bool owned;
                 using (Mutex singleton = new Mutex(true, "Local\\SayAllRemoteVoiceDesktop", out owned)) {
                     if (!owned) return 3;
