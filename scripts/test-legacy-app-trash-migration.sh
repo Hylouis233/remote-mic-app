@@ -6,8 +6,14 @@ TEST_ROOT="$(/usr/bin/mktemp -d /private/tmp/sayall-legacy-trash-test.XXXXXX)"
 TARGET_VOLUME="$TEST_ROOT/target"
 TRASH_ROOT="$TARGET_VOLUME/.Trashes/$(/usr/bin/id -u)"
 MESSAGES="$TEST_ROOT/messages.txt"
+PROCESS_INTENTS="$TEST_ROOT/process-intents.txt"
+CANARY_PID=""
 
 cleanup() {
+  if [[ -n "$CANARY_PID" ]]; then
+    kill "$CANARY_PID" 2>/dev/null || true
+    wait "$CANARY_PID" 2>/dev/null || true
+  fi
   case "$TEST_ROOT" in
     /private/tmp/sayall-legacy-trash-test.*) ;;
     *) print -u2 "refusing to clean unexpected test path: $TEST_ROOT"; return ;;
@@ -27,7 +33,21 @@ installer_message() {
   print -r -- "$2" | /usr/bin/tee -a "$MESSAGES"
 }
 
-source "$ROOT/packaging/doubao-driver/install/trash-legacy-app.zsh"
+fixture_pkill() { print -r -- "$*" >> "$PROCESS_INTENTS"; }
+FIXTURE_HELPER="$TEST_ROOT/trash-legacy-app.zsh"
+/usr/bin/sed 's#/usr/bin/pkill#fixture_pkill#g' \
+  "$ROOT/packaging/doubao-driver/install/trash-legacy-app.zsh" > "$FIXTURE_HELPER"
+if /usr/bin/grep -Eq '/(usr/)?bin/(pkill|killall|kill)[[:space:]]' "$FIXTURE_HELPER"; then
+  print -u2 'fixture still contains a live process killer'
+  exit 1
+fi
+source "$FIXTURE_HELPER"
+
+# A process with the production name must survive every migration scenario.
+/usr/bin/xcrun clang "$ROOT/Tests/Fixtures/ProcessCanary.c" -o "$TEST_ROOT/RemoteMic"
+"$TEST_ROOT/RemoteMic" 120 &
+CANARY_PID=$!
+kill -0 "$CANARY_PID"
 
 make_app() {
   local path="$1"
@@ -97,5 +117,7 @@ test -d "$MV_FAILURE_APP"
 /bin/chmod 700 "$MV_FAILURE_TRASH"
 
 test -f "$CANONICAL_APP/Contents/recovery-marker.txt"
+kill -0 "$CANARY_PID"
+/usr/bin/grep -Fx -- '-x RemoteMic' "$PROCESS_INTENTS" >/dev/null
 
-print "LEGACY APP TRASH MIGRATION TEST PASS"
+print "LEGACY APP TRASH MIGRATION TEST PASS; same-name process survived"
